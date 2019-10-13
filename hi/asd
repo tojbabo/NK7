@@ -1,1 +1,336 @@
-asdasd
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<unistd.h>
+#include<arpa/inet.h>
+#include<sys/socket.h>
+#include<sys/epoll.h>
+#include<pthread.h>
+
+#define BUF_SIZE 1024
+#define EPOLL_SIZE 5
+
+#define PORT 9000
+
+struct USER {
+	int id;
+	int port;
+	int index;
+	struct sockaddr_in adr;
+};
+
+void error_handling(char *message);
+void check_clients(int,int);
+void* recv_face(void*);
+void* send_face(void*);
+
+struct USER users[EPOLL_SIZE];
+int user_count = 0;
+char face[EPOLL_SIZE][BUF_SIZE];
+
+char msgs[EPOLL_SIZE][BUF_SIZE];
+int s_sock;
+int nums[EPOLL_SIZE];
+
+int main() {
+	pthread_t thread_recv;
+	pthread_t thread_send;
+	char* target;
+	char* target_from;
+	int arg[3] = { 0 };
+
+	int c_sock;
+	char message[BUF_SIZE];
+	int str_len, i;
+	struct sockaddr_in s_adr, c_adr;
+	socklen_t c_adr_sz;
+
+	struct epoll_event *ep_events;
+	struct epoll_event event;
+	int epfd, event_cnt;
+
+	s_sock = socket(PF_INET, SOCK_STREAM, 0);
+	if (s_sock == -1)
+		error_handling("socket() error");
+
+	memset(&s_adr, 0, sizeof(s_adr));
+	s_adr.sin_family = AF_INET;
+	s_adr.sin_addr.s_addr = htonl(INADDR_ANY);
+	s_adr.sin_port = htons(PORT);
+
+	if (bind(s_sock, (struct sockaddr*)&s_adr, sizeof(s_adr)) == -1)
+		error_handling("bind() error");
+
+	if (listen(s_sock, 5) == -1)
+		error_handling("listen() error");
+
+	epfd = epoll_create(EPOLL_SIZE);													// 정해놓은 사이즈 만큼 epoll 생성
+	ep_events = malloc(sizeof(struct epoll_event)*EPOLL_SIZE);							// epoll에 맞는 배열 생성
+
+	event.events = EPOLLIN;
+	event.data.fd = s_sock;
+
+	epoll_ctl(epfd, EPOLL_CTL_ADD, s_sock, &event);
+
+	while (1) {	//////////////////////////////////////////////////////// 서버 반복부
+		event_cnt = epoll_wait(epfd, ep_events, EPOLL_SIZE, -1);							// event_cnt : 이벤트가 발생한 소켓 수
+																						// ep_events : 이벤트가 발생한 소켓들이 저장된 배열
+		if (event_cnt == -1)
+		{
+			puts("epoll_wait() error");
+			break;
+		}
+
+		for (i = 0; i < event_cnt; i++)
+		{	//////////////////////////////////////////////////////////// 이벤트 확인부
+			if (ep_events[i].data.fd == s_sock)											////// 이벤트가 발생한 소켓이 서버소켓일 경우
+			{
+				c_adr_sz = sizeof(c_adr);
+				c_sock = accept(s_sock, (struct sockaddr*)&c_adr, &c_adr_sz);				// 연결이 발생했을때
+
+				printf("NEW CONNECT : %d\n", c_sock);
+
+				//struct USER u;
+
+				memset(&users[user_count],0,sizeof(struct USER));
+				users[user_count].id = c_sock;
+				users[user_count].port = PORT + c_sock;
+				users[user_count].index = user_count;
+
+				//u = users[user_count];
+
+				sprintf(message, "ID:%d,PORT:%d", c_sock, users[user_count].port);
+				printf("send message : %s\n", message);
+
+				write(c_sock, message, strlen(message));
+
+				/////////////////////////////////////////////////////////// 영상 수신 쓰레드 생성부
+				if (pthread_create(&thread_recv, NULL, recv_face, (void*)&users[user_count]) != 0) {
+					puts("pthread_create() error!");
+					return -1;
+				}
+				///////////////////////////////////////////////////////////
+				check_clients(c_sock,users[user_count].port);
+				user_count++;
+
+				/*
+								str_len = read(c_sock, message, BUF_SIZE);
+								message[str_len] = 0;
+								printf("%s\n", message);
+
+
+
+
+
+								if (!strcmp(message, "FC")) {
+									// 기본 연결
+									write(c_sock, "FC", strlen("FC"));
+									sleep(1);
+									sprintf(message, "%d", c_sock);
+									write(c_sock, message, strlen(message));
+									puts("FIRST CONNECTING");
+									event.events = EPOLLIN;
+									event.data.fd = c_sock;
+									epoll_ctl(epfd, EPOLL_CTL_ADD, c_sock, &event);							// 해당 클라이언트 소켓을 epoll에 추가
+
+									clients[clients_num] = c_sock;											// 클라이언트가 연결되면 클라이언트 배열에 추가
+									clients_num++;															// 개수 변경
+
+								}
+								else if ((target = strstr(message, "FSC")) != NULL) {
+									// 데이터(얼굴 영상) 전송 연결
+									write(c_sock, "FSC", strlen("FSC"));
+									puts("FACE SEND CONNECTING");
+									printf("CONNECT FROM %d\n", atoi(target+4));
+									arg[0] = c_sock;
+									arg[1] = atoi(target+4);
+									/////////////////////////////////////////////////////////// 영상 수신 쓰레드 생성부
+									if (pthread_create(&thread_recv, NULL, recv_pic, (void*)arg) != 0) {
+										puts("pthread_create() error!");
+										return -1;
+									}
+									///////////////////////////////////////////////////////////
+									check_clients(arg[1]);
+								}
+								else if ((target = strstr(message, "TRC")) != NULL) {
+									write(c_sock, "TRC", strlen("TRC"));
+									puts("TARGET RECEIVE CONNETING");
+									target_from = strchr(message, '-') + 1;
+									printf("%d to %d\n", atoi(target+4), atoi(target_from));
+									arg[0] = c_sock;
+									arg[1] = atoi(target+4);
+									arg[2] = atoi(target_from);
+									/////////////////////////////////////////////////////////// 영상 송신 쓰레드 생성부
+									if (pthread_create(&thread_send, NULL, send_pic, (void*)arg) != 0) {
+										puts("pthread_create() error!");
+										return -1;
+									}
+									///////////////////////////////////////////////////////////
+								}
+				else {
+					printf("%d is closed\n", c_sock);
+					close(c_sock);
+				}*/
+			}
+			else																		////// 이벤트가 클라이언트 소켓에서 발생한 경우
+			{
+				/**/
+				str_len = read(ep_events[i].data.fd, message, BUF_SIZE);
+				if (str_len == 0) {														////// 연결해제가 발생했을 경우
+
+					///////
+					// 특정 클라이언트가 종료 되었을때
+					// 클라이언트들의 순서를 재배치하는 로직
+					///////
+					epoll_ctl(epfd, EPOLL_CTL_DEL, ep_events[i].data.fd, NULL);
+					close(ep_events[i].data.fd);
+					printf("closed client: %d\n", ep_events[i].data.fd);
+				}
+				else
+				{																		////// 메시지 도착한 경우
+					message[str_len] = 0;
+					printf("%s", message);
+					//write(ep_events[i].data.fd,message,str_len);
+					/*
+					for (int j = 1; j < clients_num; j++) {
+						write(clients[j], message, str_len);
+					}*/
+				}
+			}
+		}
+	}
+	close(s_sock);
+	close(epfd);
+	return 0;
+}
+void error_handling(char *message){
+	fputs(message, stderr);
+	fputc('\n',stderr);
+	exit(1);
+}
+void check_clients(int sock,int new_port) {												// 새로운 클라이언트 및 기존의 클라이언트를 통지
+	char buf[BUF_SIZE];
+	for (int i = 0; i < user_count; i++) {												// 기존의 클라이언트 들에게는 새로운 클라이언트의 아이디를 알려주고
+																						// 새 클라이언트 에게는 기존의 클라이언트의 아이디를 알려준다.
+		sprintf(buf, "$NEW:%d,PORT:%d\n", sock,new_port);
+		printf("%s", buf);
+		write(users[i].id, buf, sizeof(buf));
+		sprintf(buf, "$NEW:%d,PORT:%d\n", users[i].id,users[i].port);
+		printf("%s", buf);
+		write(sock, buf, sizeof(buf));
+	}
+}
+void* recv_face(void* arg) {
+	pthread_t thread_target;
+	struct USER user;
+	struct USER target_user;
+	int sock;
+	char buf[BUF_SIZE];
+	int str_len;
+	socklen_t adr_sz;
+	struct sockaddr_in s_adr, c_adr;
+
+	user = *((struct USER*)arg);
+
+	
+	sock = socket(PF_INET, SOCK_DGRAM, 0);
+	
+	if (sock == -1)
+		error_handling("UDP socket creation error");
+	memset(&target_user, 0, sizeof(struct USER));
+	memset(&s_adr, 0, sizeof(s_adr));
+	s_adr.sin_family = AF_INET;
+	s_adr.sin_addr.s_addr = htonl(INADDR_ANY);
+	s_adr.sin_port = htons(user.port);
+	printf("Thread user port is : %d\n", user.port);
+	printf("recv from id : %d, port : %d\n", user.id, s_adr.sin_port);
+
+	if(bind(sock,(struct sockaddr*)&s_adr,sizeof(s_adr))==-1)
+		error_handling("bind() error");
+	/*
+	//////////////////////////////////////////////////////////////////////////////////////////////////////테스트용
+	//////////////////////////////////////////// 서버 오픈할 주소 다시 쓰길 밑에 세줄 완전 틀림
+	s_adr.sin_port = htons(user.port+1);
+	target_user.id = 5;
+	target_user.adr = s_adr;
+	/////////////////////////////////////////////////////////// 영상 송신 쓰레드 생성부
+	if (pthread_create(&thread_target, NULL, send_face, (void*)&target_user) != 0) {
+		puts("pthread_create() error!");
+	}
+	///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	*/
+
+	adr_sz = sizeof(c_adr); 
+	while (1) {
+		str_len = recvfrom(sock, buf, BUF_SIZE, 0,(struct sockaddr*)&c_adr, &adr_sz);
+
+		printf("RECVING DATA IP : %s, PORT : %d\n", inet_ntoa(c_adr.sin_addr), ntohs(c_adr.sin_port));
+		strcpy(face[user.index], buf);
+
+		if (str_len == 1024)
+			printf(" ");
+		else {
+			buf[str_len] = 0;
+			sscanf(buf, "%d", &target_user.id);
+			target_user.adr = c_adr;
+			/////////////////////////////////////////////////////////// 영상 송신 쓰레드 생성부
+			if (pthread_create(&thread_target, NULL, send_face, (void*)&target_user) != 0) {
+				puts("pthread_create() error!");
+				break;
+			}
+			///////////////////////////////////////////////////////////
+			
+		}
+
+		//sendto(sock, buf, sizeof(buf), 0,(struct sockaddr*)&c_adr,adr_sz);
+	}
+
+}
+void* send_face(void* arg) {
+	struct USER user;
+	struct sockaddr_in s_adr, c_adr;
+	socklen_t adr_sz;
+	int target;
+	int sock;
+	char buf[BUF_SIZE];
+	int str_len;
+
+	sock = socket(PF_INET, SOCK_DGRAM, 0);
+	
+	user = *((struct USER*)arg);
+	adr_sz = sizeof(user.adr);
+
+
+	printf("thread - IP : %s, PORT : %d\n", inet_ntoa(user.adr.sin_addr), ntohs(user.adr.sin_port));
+	/*
+	memset(&s_adr, 0, sizeof(s_adr));
+	s_adr.sin_family = AF_INET;
+	s_adr.sin_addr.s_addr = htonl(INADDR_ANY);
+	s_adr.sin_port = htons(user.port+1);
+
+	for (int i = 0; i < user_count; i++) {
+		if (users[i].id == user.id) {
+			target = i;
+			break;
+		}
+	}
+
+	printf("send data id : %d, port : %d\n", user.id,user.adr.sin_port);
+
+	if (bind(sock, (struct sockaddr*)&s_adr, sizeof(s_adr)) == -1)
+		error_handling("bind() error");
+
+	str_len = recvfrom(sock, buf, BUF_SIZE, 0, (struct sockaddr*)&c_adr, &adr_sz);
+	buf[str_len] = 0;
+	printf("recv data data : %s, port : %d\n", buf, c_adr.sin_port);
+	*/
+
+	while (1) {
+		sendto(sock, face[target], sizeof(face[target]), 0, (struct sockaddr*)&user.adr, adr_sz);
+		printf("SENDING DATA size : %ld, IP : %s, PORT : %d\n", sizeof(face[target]),inet_ntoa(user.adr.sin_addr),ntohs(user.adr.sin_port));
+		usleep(1000000);
+
+	}
+}
+
+
